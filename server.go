@@ -8,9 +8,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/mail"
 	"net/smtp"
 	"sort"
@@ -30,6 +33,7 @@ var (
 type Server struct {
 	cfg Config
 	db  *bolt.DB
+	sck net.Listener
 	msg chan *Message
 }
 
@@ -88,7 +92,16 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, err
 	}
 
-	return &Server{cfg: cfg, db: db, msg: make(chan *Message)}, nil
+	srv := &Server{cfg: cfg, db: db, msg: make(chan *Message)}
+	if cfg.ListenAddress != "" {
+		sck, err := net.Listen("tcp", cfg.ListenAddress)
+		if err != nil {
+			return nil, fmt.Errorf("strew: could not listen on command socket %q: %v", cfg.ListenAddress, err)
+		}
+		srv.sck = sck
+	}
+
+	return srv, nil
 }
 
 func (srv *Server) Msg() chan *Message {
@@ -96,6 +109,11 @@ func (srv *Server) Msg() chan *Message {
 }
 
 func (srv *Server) Serve(ctx context.Context) error {
+	if srv.sck != nil {
+		defer srv.sck.Close()
+		go srv.run(ctx)
+	}
+
 	for {
 		select {
 		case msg := <-srv.msg:
@@ -115,6 +133,43 @@ func (srv *Server) Serve(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (srv *Server) run(ctx context.Context) {
+	for {
+		c, err := srv.sck.Accept()
+		if err != nil {
+			log.Printf("server: could not accept connection: %v", err)
+			continue
+		}
+		go srv.client(ctx, c)
+	}
+}
+
+func (srv *Server) client(ctx context.Context, conn net.Conn) {
+	defer conn.Close()
+	var hdr [8]byte
+	for {
+		msg := new(Message)
+		_, err := io.ReadFull(conn, hdr[:])
+		if err != nil {
+			log.Printf("server: could not read command message header: %v", err)
+			return
+		}
+		size := binary.BigEndian.Uint64(hdr[:])
+		buf := make([]byte, size)
+		_, err = io.ReadFull(conn, buf)
+		if err != nil {
+			log.Printf("server: could not read command message body: %v", err)
+			return
+		}
+		_, err = msg.ReadFrom(bytes.NewReader(buf))
+		if err != nil {
+			log.Printf("server: could not deserialize command message: %v", err)
+			return
+		}
+		srv.msg <- msg
+	}
 }
 
 func (srv *Server) isCommand(msg *Message) bool {
@@ -508,6 +563,7 @@ func (srv *Server) commandInfo() string {
 }
 
 type Config struct {
+	ListenAddress  string `ini:"listen_address"`
 	CommandAddress string `ini:"command_address"`
 	Log            string `ini:"log"`
 	Database       string `ini:"database"`
