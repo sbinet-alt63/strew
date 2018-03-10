@@ -16,11 +16,12 @@ import (
 	"net"
 	"net/mail"
 	"net/smtp"
-	"sort"
 	"strings"
 
 	bolt "github.com/coreos/bbolt"
 	ini "gopkg.in/ini.v1"
+
+	"github.com/sbinet-alt63/strew/database"
 )
 
 var (
@@ -31,10 +32,11 @@ var (
 
 // Server is a mailing list server.
 type Server struct {
-	cfg Config
-	db  *bolt.DB
-	sck net.Listener
-	msg chan *Message
+	cfg       Config
+	db        *bolt.DB
+	sck       net.Listener
+	msg       chan *Message
+	boltStore *database.BoltDataStore
 }
 
 func NewServerFrom(fname string) (*Server, error) {
@@ -50,6 +52,7 @@ func NewServer(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	err = db.Update(func(tx *bolt.Tx) error {
 		b, err := tx.CreateBucketIfNotExists(subBucket)
 		if err != nil {
@@ -63,6 +66,7 @@ func NewServer(cfg Config) (*Server, error) {
 				return err
 			}
 		}
+
 		return err
 	})
 	if err != nil {
@@ -91,8 +95,8 @@ func NewServer(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	srv := &Server{cfg: cfg, db: db, msg: make(chan *Message)}
+	boltStore := database.New(db)
+	srv := &Server{cfg: cfg, db: db, msg: make(chan *Message), boltStore: boltStore}
 	if cfg.ListenAddress != "" {
 		sck, err := net.Listen("tcp", cfg.ListenAddress)
 		if err != nil {
@@ -456,67 +460,18 @@ func (srv *Server) send(msg *Message, recipients []string) error {
 
 // subscribers returns the list of subscribers for the given mailing list ID.
 func (srv *Server) subscribers(list string) ([]string, error) {
-	var (
-		users []string
-		key   = []byte(list)
-	)
-
-	err := srv.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(subBucket)
-		v := b.Get(key)
-		if v == nil {
-			return errInvalidListID
-		}
-		vs := bytes.Split(v, []byte(","))
-		for _, v := range vs {
-			users = append(users, string(v))
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return users, nil
+	users, err := srv.boltStore.Subscribers(list)
+	return users, err
 }
 
 // subscribe subscribes a user to a mailing list
 func (srv *Server) subscribe(user, list string) error {
-	k := []byte(list)
-	return srv.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(subBucket)
-		v := b.Get(k)
-		vs := bytes.Split(v, []byte(","))
-		user := []byte(user)
-		users := make([][]byte, 0, len(vs)+1)
-		for _, v := range vs {
-			if !bytes.Equal(v, user) {
-				users = append(users, v)
-			}
-		}
-		users = append(users, user)
-		sort.Sort(byteSlice(users))
-
-		return b.Put(k, bytes.Join(users, []byte(",")))
-	})
+	return srv.boltStore.Subscribe(user, list)
 }
 
 // unsubscribe removes a user from the given mailing list.
 func (srv *Server) unsubscribe(user, list string) error {
-	k := []byte(list)
-	return srv.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(subBucket)
-		v := b.Get(k)
-		vs := bytes.Split(v, []byte(","))
-		user := []byte(user)
-		users := make([][]byte, 0, len(vs))
-		for _, v := range vs {
-			if !bytes.Equal(v, user) {
-				users = append(users, v)
-			}
-		}
-		sort.Sort(byteSlice(users))
-		return b.Put(k, bytes.Join(users, []byte(",")))
-	})
+	return srv.boltStore.Unsubscribe(user, list)
 }
 
 func (srv *Server) isSubscribed(user, list string) bool {
@@ -609,12 +564,4 @@ type List struct {
 	SubscribersOnly bool     `ini:"subscribers_only"`
 	Posters         []string `ini:"posters,omitempty"`
 	Bcc             []string `ini:"bcc,omitempty"`
-}
-
-type byteSlice [][]byte
-
-func (p byteSlice) Len() int      { return len(p) }
-func (p byteSlice) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
-func (p byteSlice) Less(i, j int) bool {
-	return bytes.Compare(p[i], p[j]) == -1
 }
