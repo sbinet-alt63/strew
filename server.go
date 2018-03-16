@@ -19,7 +19,6 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/sbinet-alt63/strew/database"
-	_ "github.com/sbinet-alt63/strew/database/boltdb"
 	ini "gopkg.in/ini.v1"
 )
 
@@ -40,7 +39,7 @@ func NewServerFrom(fname string) (*Server, error) {
 }
 
 func NewServer(cfg Config) (*Server, error) {
-	db, err := database.Open("boltdb", cfg.Database)
+	db, err := database.Open(cfg.Driver, cfg.Database)
 	if err != nil {
 		return nil, err
 	}
@@ -490,6 +489,7 @@ type Config struct {
 	ListenAddress  string `ini:"listen_address"`
 	CommandAddress string `ini:"command_address"`
 	Log            string `ini:"log"`
+	Driver         string `ini:"driver"`
 	Database       string `ini:"database"`
 	SMTPHostname   string `ini:"smtp_hostname"`
 	SMTPPort       string `ini:"smtp_port"`
