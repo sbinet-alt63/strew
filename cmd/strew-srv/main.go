@@ -10,6 +10,7 @@ import (
 	"log"
 
 	"github.com/sbinet-alt63/strew"
+	_ "github.com/sbinet-alt63/strew/database/boltdb"
 )
 
 func main() {
